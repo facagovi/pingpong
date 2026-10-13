@@ -248,4 +248,71 @@ with open(nome_saida, "wb") as f: # "wb" = escrita binaria
     f.write(dados)
 print(f"    Arquivo salvo em {nome_saida}")
 
+# ANALISE: teorico x medido
+print()
+print("[5] Analise")
+L = seg_size * 8 # bits por segmento
+# SAW manda 1 segmento por RTT -> teto = L / RTT  (L/R eh desprezivel aqui)
+throughput_teorico = L / (rtt_medio / 1000) / 1000 if rtt_medio else 0 # kbit/s
+eficiencia = 100 * throughput_medido / throughput_teorico if throughput_teorico else 0
+
+resumo = [
+    f"Grupo: {grupo} | Arquivo: {arquivo} ({file_size} bytes) | Seed: {v.get('seed', '?')}",
+    f"Segmentos: {total_seg} x {seg_size} B | Timeout: {args.timeout * 1000:.0f} ms",
+    f"MD5: {md5_local} ({'CONFERE' if md5_bate else 'DIFERENTE'}) | DONE ok={1 if ok_servidor else 0}",
+    f"Tempo total: {tempo_total:.2f} s | Retransmissoes: {total_retx}",
+    f"RTT medio: {rtt_medio:.2f} ms (min {min(rtts_validos):.2f} / max {max(rtts_validos):.2f})" if rtts_validos else "RTT medio: sem amostras validas",
+    f"Throughput teorico (L/RTT): {throughput_teorico:.1f} kbit/s = {L} bits / {rtt_medio:.2f} ms",
+    f"Throughput medido: {throughput_medido:.1f} kbit/s",
+    f"Eficiencia: {eficiencia:.1f} % do teorico",
+]
+for linha in resumo:
+    print(f"    {linha}")
+
+nome_txt = f"{grupo}_{arquivo}_saw.txt" # p/ colar no relatorio
+with open(nome_txt, "w") as f:
+    f.write("\n".join(resumo) + "\n")
+
+# GRAFICO
+try:
+    import matplotlib
+    matplotlib.use("Agg") # gera PNG sem abrir janela
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+    print("    matplotlib nao instalado: pulei o grafico (pip install matplotlib)")
+
+if plt is not None:
+    seqs = [m["seq"] for m in metricas]
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), sharex=True) # 2 graficos, mesmo eixo x
+
+    ax1.plot(seqs, [m["throughput_kbps"] for m in metricas],
+             linewidth=0.6, color="#4C78A8", alpha=0.6, label="por segmento")
+    ax1.plot(seqs, [m["throughput_acumulado_kbps"] for m in metricas],
+             linewidth=1.8, color="#1B3A5C", label="acumulado")
+    ax1.axhline(throughput_teorico, color="#2E8B57", linestyle="--", linewidth=1.2,
+                label=f"teorico L/RTT ({throughput_teorico:.0f} kbit/s)") # teto do SAW
+    ax1.set_ylabel("Throughput (kbit/s)")
+    ax1.set_title(f"Stop-and-Wait | {grupo} | {arquivo} | {seg_size} B/seg")
+    ax1.grid(alpha=0.3)
+    ax1.legend(loc="best")
+
+    ax2.plot(seqs, [m["rtt_ms"] for m in metricas], linewidth=0.6, color="#E07B39", label="RTT")
+    ax2.axhline(rtt_medio, color="#7F3B08", linestyle="--", linewidth=1.2,
+                label=f"RTT medio ({rtt_medio:.1f} ms)")
+    com_timeout = [m for m in metricas if m["timeout_ocorrido"]] # destaca timeouts
+    if com_timeout:
+        ax2.scatter([m["seq"] for m in com_timeout], [m["rtt_ms"] for m in com_timeout],
+                    s=14, color="#C0392B", zorder=3, label=f"com timeout ({len(com_timeout)})")
+    ax2.set_ylabel("RTT (ms)")
+    ax2.set_xlabel("Numero de sequencia do segmento")
+    ax2.grid(alpha=0.3)
+    ax2.legend(loc="best")
+
+    fig.tight_layout()
+    nome_png = f"{grupo}_{arquivo}_saw.png"
+    fig.savefig(nome_png, dpi=130)
+    plt.close(fig)
+    print(f"    Grafico salvo em {nome_png}")
+
 sys.exit(0 if md5_bate else 1) # codigo de saida != 0 se o arquivo veio errado
