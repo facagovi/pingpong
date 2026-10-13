@@ -11,9 +11,13 @@ parser.add_argument("--server", default="137.131.178.229")
 parser.add_argument("--port", type=int, default=8080)
 parser.add_argument("--group", required=True) # sem --group nao roda (exigencia do enunciado)
 parser.add_argument("--file", choices=["small", "medium", "large"], default="small") # recusa nome invalido
+parser.add_argument("--segment-size", type=int, default=512) # tamanho PEDIDO no HELLO (max 512)
 parser.add_argument("--timeout", type=float, default=1.0) # segundos ate retransmitir
 parser.add_argument("--max-tentativas", type=int, default=10) # desiste depois disso
 args = parser.parse_args()
+
+if not 1 <= args.segment_size <= 512: # 512 = maximo do servidor
+    parser.error("--segment-size deve estar entre 1 e 512")
 
 serverName = args.server
 serverPort = args.port
@@ -97,7 +101,7 @@ print()
 print("[2] HELLO")
 arquivo = args.file
 grupo = args.group
-pack = f"HELLO|grupo={grupo}|segment_size=512|file={arquivo}" # Davi+Marcio+Emanuel
+pack = f"HELLO|grupo={grupo}|segment_size={args.segment_size}|file={arquivo}" # Davi+Marcio+Emanuel
 pacot.settimeout(args.timeout)
 
 v = None
@@ -128,7 +132,9 @@ print(f"    {'Arquivo:':<18}{arquivo} ({file_size} bytes = {file_size // 1024} K
 print(f"    {'Checksum MD5:':<18}{md5_servidor}")
 print(f"    {'Seed:':<18}{v.get('seed', '?')}")
 print(f"    {'Total segmentos:':<18}{total_seg}")
-print(f"    {'Tamanho segmento:':<18}{seg_size} bytes")
+print(f"    {'Tamanho segmento:':<18}{seg_size} bytes (pedido: {args.segment_size})")
+if seg_size != args.segment_size: # negociacao: vale o que o servidor devolveu
+    print(f"    servidor ajustou o segment_size de {args.segment_size} para {seg_size}")
 
 # STOP-AND-WAIT: REQ -> DATA -> ACK, um segmento por vez
 print()
@@ -198,7 +204,7 @@ print(f"    RTT medio:         {rtt_medio:.2f} ms ({len(rtts_validos)} amostras 
 print(f"    Throughput medido: {throughput_medido:.1f} kbit/s")
 
 # CSV
-nome_csv = f"{grupo}_{arquivo}_saw.csv"
+nome_csv = f"{grupo}_{arquivo}_{seg_size}B_saw.csv"
 with open(nome_csv, "w", newline="") as f: # newline="" evita linha em branco no Windows
     w = csv.DictWriter(f, fieldnames=list(metricas[0].keys()))
     w.writeheader()
@@ -269,7 +275,7 @@ resumo = [
 for linha in resumo:
     print(f"    {linha}")
 
-nome_txt = f"{grupo}_{arquivo}_saw.txt" # p/ colar no relatorio
+nome_txt = f"{grupo}_{arquivo}_{seg_size}B_saw.txt" # p/ colar no relatorio
 with open(nome_txt, "w") as f:
     f.write("\n".join(resumo) + "\n")
 
@@ -310,7 +316,7 @@ if plt is not None:
     ax2.legend(loc="best")
 
     fig.tight_layout()
-    nome_png = f"{grupo}_{arquivo}_saw.png"
+    nome_png = f"{grupo}_{arquivo}_{seg_size}B_saw.png"
     fig.savefig(nome_png, dpi=130)
     plt.close(fig)
     print(f"    Grafico salvo em {nome_png}")
