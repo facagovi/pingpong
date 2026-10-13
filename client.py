@@ -1,4 +1,5 @@
 import argparse # le argumentos da linha de comando
+import csv # gravar metricas
 import hashlib # MD5 (permitido pelo enunciado)
 import sys # sys.exit p/ abortar
 from socket import * # lib de socket
@@ -133,36 +134,76 @@ print(f"    {'Tamanho segmento:':<18}{seg_size} bytes")
 print()
 print("[3] Transferencia REQ -> DATA -> ACK")
 pedacos = [] # payloads em ordem
+metricas = [] # uma linha do CSV por segmento
 total_retx = 0
+bytes_recebidos = 0
 t_inicio = time()
 
 for seq in range(total_seg):
     req = f"REQ|seq={seq}".encode()
     retx = 0 # retransmissoes DESTE segmento
+    t_primeiro_envio = time() # inicio do segmento (p/ throughput)
 
     while True:
+        t_envio = time() # envio MAIS RECENTE (p/ rtt)
         pacot.sendto(req, srdt)
-        payload = esperar_data(seq, time() + args.timeout)
+        payload = esperar_data(seq, t_envio + args.timeout)
         if payload is not None:
             break # chegou certo
         retx += 1 # timeout: manda o REQ de novo
         if retx > args.max_tentativas:
             sys.exit(f"Segmento {seq}: sem resposta apos {args.max_tentativas} retransmissoes. Abortando.")
 
+    t_chegada = time()
     pacot.sendto(f"ACK|seq={seq}".encode(), srdt) # confirma, so depois pede o proximo
     pedacos.append(payload)
     total_retx += retx
+    bytes_recebidos += len(payload)
+
+    # rtt: ultimo REQ -> DATA. se retransmitiu, eh ambiguo (Karn): marca rtt_valido=0
+    rtt = t_chegada - t_envio
+    # throughput: bytes uteis / tempo TOTAL do segmento (inclui timeouts)
+    duracao = t_chegada - t_primeiro_envio
+    decorrido = t_chegada - t_inicio
+    metricas.append({
+        "seq": seq,
+        "bytes": len(payload),
+        "rtt_ms": round(rtt * 1000, 3),
+        "rtt_valido": 1 if retx == 0 else 0,
+        "throughput_kbps": round(len(payload) * 8 / duracao / 1000, 3),
+        "throughput_acumulado_kbps": round(bytes_recebidos * 8 / decorrido / 1000, 3),
+        "retransmissoes": retx,
+        "timeout_ocorrido": 1 if retx > 0 else 0,
+        "tempo_decorrido_s": round(decorrido, 4),
+    })
 
     if seq % 200 == 0 or seq == total_seg - 1: # progresso sem poluir a tela
-        print(f"    seg {seq + 1}/{total_seg} ({100 * (seq + 1) / total_seg:5.1f}%)  retx {retx}")
+        print(f"    seg {seq + 1}/{total_seg} ({100 * (seq + 1) / total_seg:5.1f}%)  "
+              f"rtt {rtt * 1000:6.1f} ms  retx {retx}")
 
 tempo_total = time() - t_inicio
 dados = b"".join(pedacos)
 
+# so amostras sem retransmissao entram na media (Karn)
+rtts_validos = [m["rtt_ms"] for m in metricas if m["rtt_valido"] == 1]
+rtt_medio = sum(rtts_validos) / len(rtts_validos) if rtts_validos else 0
+throughput_medido = file_size * 8 / tempo_total / 1000 # kbit/s
+
 print()
-print(f"    Recebidos:      {len(dados)} de {file_size} bytes")
-print(f"    Tempo total:    {tempo_total:.2f} s")
-print(f"    Retransmissoes: {total_retx}")
+print(f"    Recebidos:         {len(dados)} de {file_size} bytes")
+print(f"    Tempo total:       {tempo_total:.2f} s")
+print(f"    Retransmissoes:    {total_retx}")
+print(f"    Segs com timeout:  {sum(m['timeout_ocorrido'] for m in metricas)}")
+print(f"    RTT medio:         {rtt_medio:.2f} ms ({len(rtts_validos)} amostras validas)")
+print(f"    Throughput medido: {throughput_medido:.1f} kbit/s")
+
+# CSV
+nome_csv = f"{grupo}_{arquivo}_saw.csv"
+with open(nome_csv, "w", newline="") as f: # newline="" evita linha em branco no Windows
+    w = csv.DictWriter(f, fieldnames=list(metricas[0].keys()))
+    w.writeheader()
+    w.writerows(metricas)
+print(f"    Metricas salvas em {nome_csv}")
 
 # MD5 + FIN/DONE
 print()
