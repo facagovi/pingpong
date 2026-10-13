@@ -1,4 +1,5 @@
 import argparse # le argumentos da linha de comando
+import sys # sys.exit p/ abortar
 from socket import * # lib de socket
 from time import time # p/ medir rtt
 
@@ -8,11 +9,25 @@ parser.add_argument("--server", default="137.131.178.229")
 parser.add_argument("--port", type=int, default=8080)
 parser.add_argument("--group", required=True) # sem --group nao roda (exigencia do enunciado)
 parser.add_argument("--file", choices=["small", "medium", "large"], default="small") # recusa nome invalido
+parser.add_argument("--timeout", type=float, default=1.0) # segundos ate retransmitir
+parser.add_argument("--max-tentativas", type=int, default=10) # desiste depois disso
 args = parser.parse_args()
 
 serverName = args.server
 serverPort = args.port
 srdt = (serverName, serverPort)
+
+
+def campos(msg):
+    # 'OK|a=1|b=2' -> ('OK', {'a': '1', 'b': '2'})  le por NOME, ordem nao importa
+    partes = msg.split("|")
+    valores = {}
+    for p in partes[1:]:
+        if "=" in p:
+            chave, valor = p.split("=", 1)
+            valores[chave] = valor
+    return partes[0], valores
+
 
 pacot = socket(AF_INET, SOCK_DGRAM) # UDP
 
@@ -27,8 +42,8 @@ pacot.sendto("PING".encode(), srdt)
 try:
     dado, add = pacot.recvfrom(65507) # 65507 = maior datagrama UDP
     rtt = (time() - init) * 1000
-    campos = dado.decode("utf-8").split("|")
-    if len(campos) != 2 or campos[0] != "PONG" or not campos[1].startswith("time="):
+    tipo, v = campos(dado.decode("utf-8"))
+    if tipo != "PONG" or "time" not in v:
         raise ValueError(f"Resposta PING inesperada: {dado!r}")
     print(f"    RTT: {rtt:.1f} ms")
 except timeout:
@@ -36,40 +51,43 @@ except timeout:
 except ValueError as erro:
     print(f"    {erro}")
 
-# HELLO
+# HELLO (com retransmissao)
 print()
 print("[2] HELLO")
 arquivo = args.file
 grupo = args.group
 pack = f"HELLO|grupo={grupo}|segment_size=512|file={arquivo}" # Davi+Marcio+Emanuel
-pacot.settimeout(5)
-init = time()
-pacot.sendto(pack.encode(), srdt)
+pacot.settimeout(args.timeout)
+
+v = None
+for tentativa in range(1, args.max_tentativas + 1):
+    pacot.sendto(pack.encode(), srdt)
+    try:
+        dado, add = pacot.recvfrom(65507)
+        tipo, resp = campos(dado.decode("utf-8", errors="replace"))
+        if tipo == "OK":
+            v = resp
+            break
+        print(f"    ignorei pacote que nao eh OK: {dado[:30]!r}") # ex: PONG atrasado
+    except timeout:
+        print(f"    timeout no HELLO (tentativa {tentativa}), reenviando") # UDP perdeu: manda de novo
+
+if v is None:
+    sys.exit("Servidor nao respondeu ao HELLO. Abortando.")
+
 try:
-    dado, add = pacot.recvfrom(65507)
-    rtt = (time() - init) * 1000
+    file_size = int(v["file_size"])
+    md5_servidor = v["checksum"] # guardar p/ comparar no fim
+    total_seg = int(v["total_segments"])
+    seg_size = int(v["segment_size"]) # servidor pode ajustar o que pedimos
+except (KeyError, ValueError):
+    sys.exit(f"OK mal formado: {v}")
 
-    campos = dado.decode("utf-8").split("|")
-    if len(campos) < 6 or campos[0] != "OK":
-        raise ValueError(f"Resposta HELLO inesperada: {dado!r}")
-    file_size, tam_filesize = campos[1].split("=", 1)
-    checksum, rsp_checksum = campos[2].split("=", 1)
-    total_segments, rsp_totalsegments = campos[4].split("=", 1)
-    segment_size, rsp_segmentsize = campos[5].split("=", 1)
-    if (file_size, checksum, total_segments, segment_size) != (
-        "file_size", "checksum", "total_segments", "segment_size"
-    ):
-        raise ValueError("Campos HELLO inesperados")
-
-    print(f"    {'Arquivo:':<18}{arquivo} ({tam_filesize} bytes = {int(tam_filesize) // 1024} KB)")
-    print(f"    {'Checksum MD5:':<18}{rsp_checksum}")
-    print(f"    {'Total segmentos:':<18}{rsp_totalsegments}")
-    print(f"    {'Tamanho segmento:':<18}{rsp_segmentsize} bytes")
-
-except timeout:
-    print('Lerdou d++')
-except ValueError as erro:
-    print(f"    {erro}")
+print(f"    {'Arquivo:':<18}{arquivo} ({file_size} bytes = {file_size // 1024} KB)")
+print(f"    {'Checksum MD5:':<18}{md5_servidor}")
+print(f"    {'Seed:':<18}{v.get('seed', '?')}")
+print(f"    {'Total segmentos:':<18}{total_seg}")
+print(f"    {'Tamanho segmento:':<18}{seg_size} bytes")
 
 # REQ
 print()
