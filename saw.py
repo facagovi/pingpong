@@ -1,31 +1,13 @@
 import argparse
+import hashlib
 from socket import * #importa lib de sock python
-from time import time #importa the world p/ rtt
+from time import time
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--group", default="grupo11")
 parser.add_argument("--file", default="small")
 parser.add_argument("--server", default="bruh")
 args = parser.parse_args()
-
-def sfin():
-    pacot.settimeout(10) #10s pra resposta
-    init = time() #inicia contagem de tempo
-
-    try:
-        pacot.sendto(f"FIN|seq={i}".encode(), srdt) # envia pro server
-        dado, add = pacot.recvfrom(65507) #resposta tankando max do buffer
-        rtt =(time() - init) * 1000 #calcula rtt
-
-        if dado.decode("utf-8") != "OK":
-            raise ValueError(f"Resposta FIN inesperada: {dado!r}")
-
-        print(f"    Resposta FIN recebida: {dado.decode('utf-8')}")
-
-    except timeout:
-        print('Ja deu neh')
-    except ValueError as erro:
-        print(f"    {erro}")
 
 # configs do server
 serverName = '137.131.178.229' # ip do rdtunb
@@ -55,7 +37,6 @@ segment_size, bys = campos[5].split("=")
 #loop de requisições
 for i in range(int(n)):
     nncolocado = True
-
     #vamo ficar tentando requisitar o mesmo pacote até ele ser colocado no array de bytes
     while True:
         try:
@@ -82,17 +63,46 @@ for i in range(int(n)):
             elif num != str(i):
                 #manda ack do pacote que ja foi colocado no array, pq o server nn sabe se ele ja foi colocado ou nn
                 pacot.sendto(f"ACK|seq={i}".encode(), srdt) # envia ack pro server
-                continue
+                continue #esse aqui é ack se deu erro
 
-            # ACK
+            # ACK oficial
             if not nncolocado: #Ou seja, payload recebeu tranquilo
                 pacot.sendto(f"ACK|seq={i}".encode(), srdt) # envia ack pro server
+                break
 
         #se der timeout, retransmite a mesma requisição
         except timeout:
-            print(f"    Timeout na requisição {i}, retransmitindo...")
             retransmitidos += 1
-            continue
+            continue #manda de novo
+
+        break
+
+#codifica o array de bytes em bytes e calcula o checksum md5 do arquivo recebido
+msg = bytes(bytearray, 'utf-8')
+md5 = hashlib.md5(msg).hexdigest()
+
+while True:
+    try:
+        pacot.settimeout(10) #10s pra resposta
+        pacot.sendto(f"FIN|checksum={md5}".encode(), srdt) # envia pro server
+
+        done, add = pacot.recvfrom(65507) #resposta tankando max do buffer
+        
+        done = done.decode("utf-8").split("|") #separa campos da resposta
+
+        #salva campos da data
+        #done= campo[0] whatever
+        ok, fim = campos[1].split("=")
+
+    except timeout:
+        continue #nn perceberam q acabou, manda de novo
+    if fim == 1:
+        break
+
+if fim == 1:
+    print("Arquivo recebido com sucesso!")
+else:
+    print("Arquivo corrompido! Checagem MD5 não confere com a do servidor.")
 
 
 pacot.close() #fecha conexao socket client
