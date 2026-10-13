@@ -29,11 +29,50 @@ def campos(msg):
     return partes[0], valores
 
 
+def separar_data(dado):
+    # b'DATA|seq=N|total=T|<payload>' -> (N, payload)   ou None se nao for DATA valido
+    # payload eh binario e pode ter '|': corta so no 3o '|'
+    pos = -1
+    for _ in range(3):
+        pos = dado.find(b"|", pos + 1)
+        if pos == -1:
+            return None
+    try:
+        partes = dado[:pos].decode("ascii").split("|")
+        if len(partes) != 3 or partes[0] != "DATA":
+            return None
+        seq = int(partes[1].split("=", 1)[1])
+        total = int(partes[2].split("=", 1)[1])
+    except (UnicodeDecodeError, ValueError, IndexError):
+        return None
+    payload = dado[pos + 1:]
+    if len(payload) != total: # veio cortado -> trata como perdido
+        return None
+    return seq, payload
+
+
+def esperar_data(seq, prazo):
+    # espera o DATA do seq pedido ate 'prazo'. None = timeout
+    while True:
+        restante = prazo - time() # tempo que SOBRA, nao reinicia o timeout
+        if restante <= 0:
+            return None
+        pacot.settimeout(restante)
+        try:
+            dado, add = pacot.recvfrom(65507)
+        except timeout:
+            return None
+        r = separar_data(dado)
+        if r is not None and r[0] == seq:
+            return r[1]
+        # seq errado = DATA atrasado de REQ antigo: descarta e segue esperando
+
+
 pacot = socket(AF_INET, SOCK_DGRAM) # UDP
 
 # PING PONG
 pacot.settimeout(5)
-print("=== RDT-UnB ===")
+print("=== RDT-UnB  Stop-and-Wait ===")
 print(f"Servidor: {serverName}:{serverPort}")
 print()
 print("[1] PING")
@@ -89,44 +128,39 @@ print(f"    {'Seed:':<18}{v.get('seed', '?')}")
 print(f"    {'Total segmentos:':<18}{total_seg}")
 print(f"    {'Tamanho segmento:':<18}{seg_size} bytes")
 
-# REQ
+# STOP-AND-WAIT: REQ -> DATA -> ACK, um segmento por vez
 print()
-print("[3] REQ seg=0")
-pacot.settimeout(5)
-init = time()
+print("[3] Transferencia REQ -> DATA -> ACK")
+pedacos = [] # payloads em ordem
+total_retx = 0
+t_inicio = time()
 
-try:
-    pacot.sendto("REQ|seq=0".encode(), srdt)
-    dado, add = pacot.recvfrom(65507)
-    rtt = (time() - init) * 1000
+for seq in range(total_seg):
+    req = f"REQ|seq={seq}".encode()
+    retx = 0 # retransmissoes DESTE segmento
 
-    # payload eh binario e pode ter '|': corta so no 3o '|'
-    pos = -1
-    for _ in range(3):
-        pos = dado.find(b"|", pos + 1)
-        if pos == -1:
-            raise ValueError("Cabeçalho DATA incompleto")
+    while True:
+        pacot.sendto(req, srdt)
+        payload = esperar_data(seq, time() + args.timeout)
+        if payload is not None:
+            break # chegou certo
+        retx += 1 # timeout: manda o REQ de novo
+        if retx > args.max_tentativas:
+            sys.exit(f"Segmento {seq}: sem resposta apos {args.max_tentativas} retransmissoes. Abortando.")
 
-    cabecalho = dado[:pos + 1]
-    payload = dado[pos + 1:]
-    partes = cabecalho[:-1].decode("utf-8").split("|")
-    if (len(partes) != 3 or partes[0] != "DATA"
-            or partes[1] != "seq=0"
-            or not partes[2].startswith("total=")):
-        raise ValueError(f"Resposta DATA inesperada: {cabecalho!r}")
-    total = int(partes[2].split("=", 1)[1])
-    if len(payload) != total:
-        raise ValueError(f"Payload com {len(payload)} bytes; esperados {total}")
+    pacot.sendto(f"ACK|seq={seq}".encode(), srdt) # confirma, so depois pede o proximo
+    pedacos.append(payload)
+    total_retx += retx
 
-    primeiros8bytes = payload[:8]
-    hex_str = " ".join(f"{b:02x}" for b in primeiros8bytes)
+    if seq % 200 == 0 or seq == total_seg - 1: # progresso sem poluir a tela
+        print(f"    seg {seq + 1}/{total_seg} ({100 * (seq + 1) / total_seg:5.1f}%)  retx {retx}")
 
-    print(f"    Payload recebido: {len(payload)} bytes")
-    print(f"    Primeiros 8 bytes: {hex_str}")
+tempo_total = time() - t_inicio
+dados = b"".join(pedacos)
 
-except timeout:
-    print('Lerdou d++')
-except ValueError as erro:
-    print(f"    {erro}")
+print()
+print(f"    Recebidos:      {len(dados)} de {file_size} bytes")
+print(f"    Tempo total:    {tempo_total:.2f} s")
+print(f"    Retransmissoes: {total_retx}")
 
 pacot.close()
