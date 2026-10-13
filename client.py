@@ -1,4 +1,5 @@
 import argparse # le argumentos da linha de comando
+import hashlib # MD5 (permitido pelo enunciado)
 import sys # sys.exit p/ abortar
 from socket import * # lib de socket
 from time import time # p/ medir rtt
@@ -163,4 +164,47 @@ print(f"    Recebidos:      {len(dados)} de {file_size} bytes")
 print(f"    Tempo total:    {tempo_total:.2f} s")
 print(f"    Retransmissoes: {total_retx}")
 
+# MD5 + FIN/DONE
+print()
+print("[4] Verificacao MD5 + FIN")
+md5_local = hashlib.md5(dados).hexdigest() # md5 do que NOS recebemos
+md5_bate = md5_local == md5_servidor.lower()
+print(f"    MD5 esperado: {md5_servidor}")
+print(f"    MD5 recebido: {md5_local}  -> {'CONFERE' if md5_bate else 'DIFERENTE'}")
+
+fin = f"FIN|checksum={md5_local}".encode() # manda o NOSSO md5, servidor que julga
+ok_servidor = None # None = servidor nao respondeu
+for tentativa in range(1, args.max_tentativas + 1):
+    pacot.sendto(fin, srdt)
+    prazo = time() + args.timeout
+    while ok_servidor is None:
+        restante = prazo - time()
+        if restante <= 0:
+            break
+        pacot.settimeout(restante)
+        try:
+            dado, add = pacot.recvfrom(65507)
+        except timeout:
+            break
+        if dado.startswith(b"DONE|"):
+            tipo, resp = campos(dado.decode("utf-8", errors="replace"))
+            ok_servidor = resp.get("ok") == "1"
+        # qualquer outra coisa (DATA atrasado) ignora
+    if ok_servidor is not None:
+        break
+    print(f"    timeout no FIN (tentativa {tentativa}), reenviando")
+
+if ok_servidor is None:
+    print("    Servidor nao respondeu ao FIN")
+else:
+    print(f"    DONE do servidor: ok={1 if ok_servidor else 0}")
+
 pacot.close()
+
+# salva o arquivo recebido
+nome_saida = f"{grupo}_{arquivo}.bin"
+with open(nome_saida, "wb") as f: # "wb" = escrita binaria
+    f.write(dados)
+print(f"    Arquivo salvo em {nome_saida}")
+
+sys.exit(0 if md5_bate else 1) # codigo de saida != 0 se o arquivo veio errado
