@@ -23,7 +23,9 @@ if args.protocol == "saw":
 
 srdt = (args.server, args.port)
 pacot = socket(AF_INET, SOCK_DGRAM)
-pacot.settimeout(1.0)  # Timeout base de 1 segundo
+TIMEOUT_SECONDS = 1.0
+pacot.settimeout(TIMEOUT_SECONDS)
+session_start = time()
 
 # Handshake HELLO / OK
 print(f"[*] Iniciando sessão com {args.protocol.upper()} (Janela={args.window}, Perda={args.loss*100}%)...")
@@ -61,10 +63,30 @@ for seq in range(total_segments):
         "timeout_occurred": 0,
         "simulated_loss": 0,
         "rtt_ms": 0.0,
+        "rtt_valid": "",
+        "segment_elapsed_ms": "",
+        "timeout_count": "",
         "throughput_kbps": 0.0,
         "timestamp": "",
         "size_bytes": 0
     }
+
+
+def registrar_segmento_janela(seq, payload, instante, ultimo_envio, primeiro_envio):
+    """Registra RTT apenas quando não há ambiguidade por retransmissão."""
+    m = metricas_segmento[seq]
+    duracao_ms = (instante - primeiro_envio[seq]) * 1000
+    m["segment_elapsed_ms"] = round(duracao_ms, 3)
+    m["rtt_valid"] = int(m["retransmissions"] == 0)
+    m["rtt_ms"] = round((instante - ultimo_envio[seq]) * 1000, 3) if m["rtt_valid"] else ""
+    m["size_bytes"] = len(payload)
+    # Taxa efetiva deste segmento: inclui toda a espera e suas retransmissões.
+    m["throughput_kbps"] = round(len(payload) * 8 / duracao_ms, 3) if duracao_ms > 0 else 0.0
+    m["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+
+transfer_start = None
+transfer_end = None
 
 # STOP AND WAIT
 if args.protocol == "saw":
@@ -111,15 +133,32 @@ if args.protocol == "saw":
 elif args.protocol == "gbn":
     base = 0
     next_seq = 0
-    time_envios = {}
+    time_envios = {}  # Último REQ enviado para cada segmento pendente.
+    primeiro_envio = {}
 
     while base < total_segments:
-        # Envia REQs até preencher a janela, simulação do gbn
+        # Preenche a janela; o prazo de timeout da base nasce no envio do REQ.
         while next_seq < base + args.window and next_seq < total_segments:
             time_envios[next_seq] = time()
+            if transfer_start is None:
+                transfer_start = time_envios[next_seq]
+            primeiro_envio.setdefault(next_seq, time_envios[next_seq])
+            metricas_segmento[next_seq]["timeout_count"] = 0
             pacot.sendto(f"REQ|seq={next_seq}".encode(), srdt)
             next_seq += 1
 
+        espera = time_envios[base] + TIMEOUT_SECONDS - time()
+        if espera <= 0:
+            metricas_segmento[base]["timeout_occurred"] = 1
+            metricas_segmento[base]["timeout_count"] += 1
+            # GBN retransmite a base e todos os REQs seguintes ainda pendentes.
+            for seq in range(base, next_seq):
+                metricas_segmento[seq]["retransmissions"] += 1
+                time_envios[seq] = time()
+                pacot.sendto(f"REQ|seq={seq}".encode(), srdt)
+            continue
+
+        pacot.settimeout(espera)
         try:
             dado, _ = pacot.recvfrom(65507)
             fim_req = time()
@@ -127,6 +166,9 @@ elif args.protocol == "gbn":
             if partes[0] == b"DATA":
                 num_seq = int(partes[1].split(b"=")[1])
                 payload_bin = partes[3]
+
+                if not 0 <= num_seq < total_segments:
+                    continue
 
                 # Simula perda
                 if args.loss > 0.0 and random.random() < args.loss:
@@ -135,41 +177,54 @@ elif args.protocol == "gbn":
 
                 # No GBN só aceita se for exatamente a base esperada em ordem
                 if num_seq == base:
-                    rtt = (fim_req - time_envios[base]) * 1000
-                    
                     buffer_partes[base] = payload_bin
-                    
-                    m = metricas_segmento[base]
-                    m["rtt_ms"] = round(rtt, 2)
-                    m["size_bytes"] = len(payload_bin)
-                    m["throughput_kbps"] = round((len(payload_bin) * 8) / rtt, 2) if rtt > 0.001 else 0.0
-                    m["timestamp"] = datetime.now(timezone.utc).isoformat()
-                    
+                    registrar_segmento_janela(base, payload_bin, fim_req, time_envios, primeiro_envio)
+                    del time_envios[base]
                     base += 1
+                    if base == total_segments:
+                        transfer_end = fim_req
 
         except (timeout, TimeoutError):
-            # no gbn timeout da base retransmite ele e TODOS os seguintes da janela
-            metricas_segmento[base]["timeout_occurred"] = 1
-            for s in range(base, next_seq):
-                metricas_segmento[s]["retransmissions"] += 1
-            # Recua o "ponteiro" para o início da janela não confirmada
-            next_seq = base
+            # O prazo é verificado no início da próxima iteração.
+            pass
 
 
 # SELECTIVE REPEAT
 elif args.protocol == "sr":
     base = 0
     next_seq = 0
-    time_envios = {}
+    time_envios = {}  # Um prazo independente para cada REQ não recebido.
+    primeiro_envio = {}
     req_rcv = [False] * total_segments
 
     while base < total_segments:
-        # Envia REQs até preencher a janela, não síncrono mas simula o SR
+        # Envia REQs até preencher a janela.
         while next_seq < base + args.window and next_seq < total_segments:
             time_envios[next_seq] = time()
+            if transfer_start is None:
+                transfer_start = time_envios[next_seq]
+            primeiro_envio.setdefault(next_seq, time_envios[next_seq])
+            metricas_segmento[next_seq]["timeout_count"] = 0
             pacot.sendto(f"REQ|seq={next_seq}".encode(), srdt)
             next_seq += 1
 
+        agora = time()
+        expirados = [seq for seq, enviado in time_envios.items()
+                     if enviado + TIMEOUT_SECONDS <= agora]
+        if expirados:
+            # Cada REQ expirado é retransmitido individualmente; segmentos já
+            # recebidos saem de time_envios e não entram nesta lista.
+            for seq in expirados:
+                m = metricas_segmento[seq]
+                m["timeout_occurred"] = 1
+                m["timeout_count"] += 1
+                m["retransmissions"] += 1
+                time_envios[seq] = time()
+                pacot.sendto(f"REQ|seq={seq}".encode(), srdt)
+            continue
+
+        espera = min(enviado + TIMEOUT_SECONDS for enviado in time_envios.values()) - agora
+        pacot.settimeout(max(espera, 0.000001))
         try:
             dado, _ = pacot.recvfrom(65507)
             fim_req = time()
@@ -178,8 +233,18 @@ elif args.protocol == "sr":
                 num_seq = int(partes[1].split(b"=")[1])
                 payload_bin = partes[3]
 
+                if not 0 <= num_seq < total_segments:
+                    continue
+
                 # Confirma individualmente com ACK mesmo se for segmento repetido antigo
                 if num_seq < base:
+                    pacot.sendto(f"ACK|seq={num_seq}".encode(), srdt)
+                    continue
+
+                if not base <= num_seq < base + args.window:
+                    continue
+
+                if req_rcv[num_seq]:
                     pacot.sendto(f"ACK|seq={num_seq}".encode(), srdt)
                     continue
 
@@ -188,30 +253,24 @@ elif args.protocol == "sr":
                     metricas_segmento[num_seq]["simulated_loss"] = 1
                     continue
 
-                if base <= num_seq < base + args.window:
-                    pacot.sendto(f"ACK|seq={num_seq}".encode(), srdt)
-                    
-                    if not req_rcv[num_seq]:
-                        rtt = (fim_req - time_envios[num_seq]) * 1000 #instante certo
-                        req_rcv[num_seq] = True
-                        buffer_partes[num_seq] = payload_bin
-                        
-                        m = metricas_segmento[num_seq]
-                        m["rtt_ms"] = round(rtt, 2)
-                        m["size_bytes"] = len(payload_bin)
-                        m["throughput_kbps"] = round((len(payload_bin) * 8) / rtt, 2) if rtt > 0.001 else 0.0
-                        m["timestamp"] = datetime.now(timezone.utc).isoformat()
+                pacot.sendto(f"ACK|seq={num_seq}".encode(), srdt)
+                registrar_segmento_janela(num_seq, payload_bin, fim_req, time_envios, primeiro_envio)
+                req_rcv[num_seq] = True
+                buffer_partes[num_seq] = payload_bin
+                del time_envios[num_seq]
 
-                    # Desliza a base da janela enquanto houver ACKs consecutivos prontos
-                    while base < total_segments and req_rcv[base]:
-                        base += 1
+                # Desliza a base enquanto houver segmentos consecutivos prontos.
+                while base < total_segments and req_rcv[base]:
+                    base += 1
+                if base == total_segments:
+                    transfer_end = fim_req
 
         except (timeout, TimeoutError):
-            # Regra SR: retransmite APENAS o segmento em timeout (a base não confirmada)
-            metricas_segmento[base]["timeout_occurred"] = 1
-            metricas_segmento[base]["retransmissions"] += 1
-            time_envios[base] = time()
-            pacot.sendto(f"REQ|seq={base}".encode(), srdt)
+            # O prazo de cada segmento é verificado na próxima iteração.
+            pass
+
+if transfer_end is None:
+    transfer_end = time()
 
 # ==============================================================================
 # MONTAGEM FINAL DO ARQUIVO E CHECK E HASH MD5
@@ -227,6 +286,7 @@ print(f"[*] MD5 Calculado: {md5_calculado}")
 
 # Encerramento com FIN / DONE
 ok_status = "0"
+pacot.settimeout(TIMEOUT_SECONDS)
 while True:
     try:
         pacot.sendto(f"FIN|checksum={md5_calculado}".encode("utf-8"), srdt)
@@ -240,6 +300,8 @@ while True:
             
     except timeout:
         print("[!] Timeout no FIN, tentando novamente...")
+
+session_end = time()
 
 if ok_status == "1":
     print("[+] SUCESSO: Arquivo íntegro transferido e validado com sucesso!")
@@ -261,13 +323,15 @@ campos_csv = [
     "timeout_ms", "throughput_kbps", "retransmissions", "timeout_occurred",
     "window_size", "protocol", "simulated_loss"
 ]
+if args.protocol in ("gbn", "sr"):
+    campos_csv += ["rtt_valid", "segment_elapsed_ms", "timeout_count"]
 
 with open(csv_filename, "w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=campos_csv)
     writer.writeheader()
     for seq in range(total_segments):
         m = metricas_segmento[seq]
-        writer.writerow({
+        linha = {
             "segment": seq,
             "timestamp": m["timestamp"],
             "size_bytes": m["size_bytes"],
@@ -280,6 +344,40 @@ with open(csv_filename, "w", newline="", encoding="utf-8") as f:
             "window_size": args.window,
             "protocol": args.protocol,
             "simulated_loss": m["simulated_loss"]
-        })
+        }
+        if args.protocol in ("gbn", "sr"):
+            linha.update({
+                "rtt_valid": m["rtt_valid"],
+                "segment_elapsed_ms": m["segment_elapsed_ms"],
+                "timeout_count": m["timeout_count"]
+            })
+        writer.writerow(linha)
 
 print(f"[+] Métricas salvas com sucesso em: {csv_filename}")
+
+if args.protocol in ("gbn", "sr"):
+    # Tempo total: HELLO até DONE. A taxa média usa o mesmo intervalo.
+    # O intervalo de transferência (primeiro REQ ao último DATA) é separado.
+    total_time_s = round(session_end - session_start, 9)
+    transfer_time_s = round(transfer_end - transfer_start, 9)
+    resumo = {
+        "protocol": args.protocol,
+        "window_size": args.window,
+        "loss": args.loss,
+        "file": args.file,
+        "total_time_s": total_time_s,
+        "transfer_time_s": transfer_time_s,
+        "average_throughput_kbps": round(len(arquivo_final) * 8 / total_time_s / 1000, 3),
+        "transfer_throughput_kbps": round(len(arquivo_final) * 8 / transfer_time_s / 1000, 3),
+        "total_retransmissions": sum(m["retransmissions"] for m in metricas_segmento.values()),
+        "total_timeouts": sum(m["timeout_count"] for m in metricas_segmento.values())
+    }
+    summary_filename = f"summary_{args.group}_{args.protocol}_{timestamp_str}.csv"
+    with open(summary_filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=resumo.keys())
+        writer.writeheader()
+        writer.writerow(resumo)
+    print(f"[+] Resumo da execução: {summary_filename}")
+    print(f"[*] Tempo total: {resumo['total_time_s']} s | "
+          f"Throughput médio: {resumo['average_throughput_kbps']} kbps | "
+          f"Retransmissões: {resumo['total_retransmissions']}")
