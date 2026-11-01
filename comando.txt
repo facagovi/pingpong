@@ -1,4 +1,4 @@
-python3 gbnsr.py --group grupo11 --protocol saw --file small --loss 0.10
+python3 gbnsr.py --group grupo11 --protocol saw --file small --loss 0
 python3 gbnsr.py --group grupo11 --protocol gbn --file small --window 16 --loss 0
 python3 gbnsr.py --group grupo11 --protocol sr --file small --window 16 --loss 0
 
