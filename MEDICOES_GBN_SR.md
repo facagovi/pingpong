@@ -1,10 +1,12 @@
-# Medições de GBN e SR
+# Medições de SAW, GBN e SR
 
-Esta branch altera somente a temporização e as métricas de GBN e SR em `gbnsr.py`.
-O SAW conserva o comportamento e o formato de CSV anteriores.
+Esta branch corrige a temporização e as métricas dos três protocolos em `gbnsr.py`.
 
 ## Timeout e retransmissões
 
+- SAW: o timeout de 1 s é contado desde o último REQ do segmento atual.
+  Um DATA descartado pela simulação não provoca reenvio imediato: o cliente
+  espera esse prazo vencer. Cada novo REQ incrementa `retransmissions`.
 - GBN: o timeout de 1 s é contado desde o último envio do REQ da base.
   Quando a base expira, o cliente retransmite a base e todos os segmentos
   seguintes ainda pendentes na janela. `timeout_count` cresce somente para a
@@ -16,7 +18,7 @@ O SAW conserva o comportamento e o formato de CSV anteriores.
 ## CSV por segmento
 
 O arquivo `metrics_*.csv` conserva as colunas anteriores e acrescenta, para
-GBN/SR:
+SAW, GBN e SR:
 
 - `rtt_ms`: tempo do envio ao recebimento apenas quando houve uma única
   tentativa. Fica vazio após retransmissão, pois a resposta pode corresponder
@@ -29,10 +31,13 @@ GBN/SR:
 - `timeout_count`: número de expirações de prazo atribuídas ao segmento.
   `timeout_occurred` continua sendo apenas um indicador binário.
 - `retransmissions`: número de REQs adicionais enviados para o segmento.
+- `simulated_loss`: continua sendo um indicador binário. Um segmento pode ter
+  vários descartes simulados e, portanto, mais retransmissões do que o valor
+  desse campo sugere.
 
 ## Resumo da execução
 
-Cada execução GBN/SR gera também `summary_*.csv`, com uma linha:
+Cada execução gera também `summary_*.csv`, com uma linha:
 
 - `total_time_s`: do início do HELLO até o recebimento de DONE;
 - `average_throughput_kbps`: bits úteis recebidos divididos por `total_time_s`;

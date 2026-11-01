@@ -18,7 +18,7 @@ PAYLOADS = [bytes([seq]) * 512 for seq in range(4)]
 EXPECTED = hashlib.md5(b"".join(PAYLOADS)).hexdigest()
 
 
-def execute(protocol, dropped_first):
+def execute(protocol, dropped_first, loss="0", seed=None):
     server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server.bind(("127.0.0.1", 0))
     server.settimeout(0.05)
@@ -65,11 +65,20 @@ def execute(protocol, dropped_first):
     thread.start()
     try:
         with tempfile.TemporaryDirectory() as directory:
-            command = [
-                sys.executable, str(CLIENT), "--server", "127.0.0.1",
+            command = [sys.executable]
+            if seed is not None:
+                command += [
+                    "-c",
+                    "import random,runpy,sys; random.seed(int(sys.argv[1])); "
+                    "path=sys.argv[2]; sys.argv=sys.argv[2:]; "
+                    "runpy.run_path(path,run_name='__main__')",
+                    str(seed),
+                ]
+            command += [
+                str(CLIENT), "--server", "127.0.0.1",
                 "--port", str(server.getsockname()[1]), "--group", "teste",
                 "--file", "small", "--protocol", protocol,
-                "--window", "4", "--loss", "0",
+                "--window", "4", "--loss", loss,
             ]
             result = subprocess.run(command, cwd=directory, capture_output=True,
                                     text=True, timeout=6)
@@ -112,8 +121,8 @@ class TimeoutMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["rtt_ms"], "")
         self.assertGreaterEqual(float(rows[0]["segment_elapsed_ms"]), 1000)
 
-    def test_no_loss_keeps_rtt_valid_for_both_protocols(self):
-        for protocol in ("gbn", "sr"):
+    def test_no_loss_keeps_rtt_valid_for_all_protocols(self):
+        for protocol in ("saw", "gbn", "sr"):
             with self.subTest(protocol=protocol):
                 rows, totals, requests, received = execute(protocol, set())
                 self.check_summary(rows, totals, requests, received)
@@ -122,6 +131,36 @@ class TimeoutMetricsTests(unittest.TestCase):
                 self.assertEqual([row["rtt_valid"] for row in rows],
                                  ["1", "1", "1", "1"])
                 self.assertTrue(all(float(row["rtt_ms"]) > 0 for row in rows))
+
+    def test_saw_counts_real_loss_after_timeout(self):
+        rows, totals, requests, received = execute("saw", {0})
+        self.check_summary(rows, totals, requests, received)
+        self.assertEqual([int(row["retransmissions"]) for row in rows],
+                         [1, 0, 0, 0])
+        self.assertEqual([int(row["timeout_count"]) for row in rows],
+                         [1, 0, 0, 0])
+        self.assertEqual(rows[0]["rtt_valid"], "0")
+        self.assertEqual(rows[0]["rtt_ms"], "")
+        self.assertGreaterEqual(float(rows[0]["segment_elapsed_ms"]), 1000)
+
+    def test_saw_simulated_loss_waits_for_timeout_and_counts_retry(self):
+        rows, totals, requests, received = execute("saw", set(), loss="0.10", seed=31)
+        self.check_summary(rows, totals, requests, received)
+        self.assertEqual([int(row["simulated_loss"]) for row in rows],
+                         [1, 0, 0, 0])
+        self.assertEqual([int(row["retransmissions"]) for row in rows],
+                         [1, 0, 0, 0])
+        self.assertEqual([int(row["timeout_count"]) for row in rows],
+                         [1, 0, 0, 0])
+        self.assertGreaterEqual(float(rows[0]["segment_elapsed_ms"]), 1000)
+
+    def test_saw_counts_repeated_simulated_drops_of_same_segment(self):
+        rows, totals, requests, received = execute("saw", set(), loss="0.10", seed=123)
+        self.check_summary(rows, totals, requests, received)
+        self.assertEqual(rows[0]["simulated_loss"], "1")
+        self.assertEqual(int(rows[0]["retransmissions"]), 2)
+        self.assertEqual(int(rows[0]["timeout_count"]), 2)
+        self.assertEqual(requests[0], 3)
 
     def test_sr_retransmits_each_expired_request_only(self):
         rows, totals, requests, received = execute("sr", {0, 1})
