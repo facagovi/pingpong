@@ -2,6 +2,9 @@ python3 gbnsr.py --group grupo11 --protocol saw --file small --loss 0
 python3 gbnsr.py --group grupo11 --protocol gbn --file small --window 16 --loss 0
 python3 gbnsr.py --group grupo11 --protocol sr --file small --window 16 --loss 0
 
+python3 adap.py --group grupo11 --protocol gbn --file small --window 16 --loss 0
+python3 adap.py --group grupo11 --protocol sr --file small --window 16 --loss 0
+
 --file small medium large
 --window 4 8 16
 --loss 0 0.05 0.10
