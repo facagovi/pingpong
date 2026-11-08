@@ -2,8 +2,19 @@ python3 gbnsr.py --group grupo11 --protocol saw --file small --loss 0
 python3 gbnsr.py --group grupo11 --protocol gbn --file small --window 16 --loss 0
 python3 gbnsr.py --group grupo11 --protocol sr --file small --window 16 --loss 0
 
+# Entrega 3 - timeout adaptativo (EWMA)
 python3 adap.py --group grupo11 --protocol gbn --file small --window 16 --loss 0
 python3 adap.py --group grupo11 --protocol sr --file small --window 16 --loss 0
+
+# Mesmo protocolo com timeout fixo (comparacao fixo x adaptativo)
+python3 adap.py --group grupo11 --protocol sr --file small --window 16 --loss 0.05 --timeout-fixo 1000
+python3 adap.py --group grupo11 --protocol sr --file small --window 16 --loss 0.05
+
+# Outros valores de alpha e beta (padrao do TCP: 0.125 e 0.25)
+python3 adap.py --group grupo11 --protocol sr --file small --window 16 --loss 0.05 --alpha 0.25 --beta 0.5
+
+# Testes locais (nao usam o servidor do professor)
+python3 -m unittest discover -s tests
 
 --file small medium large
 --window 4 8 16

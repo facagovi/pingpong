@@ -135,6 +135,7 @@ if args.protocol == "saw":
                 continue
 
             buffer_partes[seq_atual] = payload_bin
+            pacot.sendto(f"ACK|seq={seq_atual}".encode(), srdt)  # confirma o segmento
             registrar_segmento(seq_atual, payload_bin, fim_req,
                                time_envios, primeiro_envio)
             del time_envios[seq_atual]
@@ -193,6 +194,7 @@ elif args.protocol == "gbn":
                 # No GBN só aceita se for exatamente a base esperada em ordem
                 if num_seq == base:
                     buffer_partes[base] = payload_bin
+                    pacot.sendto(f"ACK|seq={base}".encode(), srdt)  # ACK cumulativo da base
                     registrar_segmento(base, payload_bin, fim_req, time_envios, primeiro_envio)
                     del time_envios[base]
                     base += 1
